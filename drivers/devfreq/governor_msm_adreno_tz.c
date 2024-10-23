@@ -26,22 +26,19 @@
 #include "governor.h"
 
 static DEFINE_SPINLOCK(tz_lock);
+
 /*
  * FLOOR is 5msec to capture up to 3 re-draws
  * per frame for 60fps content.
  */
-#define FLOOR		        5000
+#define FLOOR		        3350
+
 /*
  * MIN_BUSY is 1 msec for the sample to be sent
  */
 #define MIN_BUSY		1000
 #define MAX_TZ_VERSION		0
 
-/*
- * CEILING is 50msec, larger than any standard
- * frame length, but less than the idle timer.
- */
-#define CEILING			50000
 #define TZ_RESET_ID		0x3
 #define TZ_UPDATE_ID		0x4
 #define TZ_INIT_ID		0x6
@@ -335,6 +332,7 @@ static int tz_get_target_freq(struct devfreq *devfreq, unsigned long *freq)
 	struct devfreq_dev_status stats;
 	int val, level = 0;
 	unsigned int scm_data[4];
+	unsigned int refresh_rate = dsi_panel_get_refresh_rate();
 	int context_count = 0;
 
 	/* keeps stats.private_data == NULL   */
@@ -346,13 +344,14 @@ static int tz_get_target_freq(struct devfreq *devfreq, unsigned long *freq)
 
 	*freq = stats.current_frequency;
 	priv->bin.total_time += stats.total_time;
-	priv->bin.busy_time += stats.busy_time;
+	priv->bin.busy_time += stats.busy_time * refresh_rate / 30;
 
 	if (stats.private_data)
 		context_count =  *((int *)stats.private_data);
 
 	/* Update the GPU load statistics */
 	compute_work_load(&stats, priv, devfreq);
+
 	/*
 	 * Do not waste CPU cycles running this algorithm if
 	 * the GPU just started, or if less than FLOOR time
@@ -371,23 +370,12 @@ static int tz_get_target_freq(struct devfreq *devfreq, unsigned long *freq)
 		return level;
 	}
 
-	/*
-	 * If there is an extended block of busy processing,
-	 * increase frequency.  Otherwise run the normal algorithm.
-	 */
-	if (!priv->disable_busy_time_burst &&
-			priv->bin.busy_time > CEILING) {
-		val = -1 * level;
-	} else {
-		unsigned int refresh_rate = dsi_panel_get_refresh_rate();
+	scm_data[0] = level;
+	scm_data[1] = priv->bin.total_time;
+	scm_data[2] = priv->bin.busy_time;
+	scm_data[3] = context_count;
+	__secure_tz_update_entry3(scm_data, sizeof(scm_data), &val, sizeof(val), priv);
 
-		scm_data[0] = level;
-		scm_data[1] = priv->bin.total_time;
-		scm_data[2] = priv->bin.busy_time * refresh_rate / 30;
-		scm_data[3] = context_count;
-		__secure_tz_update_entry3(scm_data, sizeof(scm_data),
-					&val, sizeof(val), priv);
-	}
 	priv->bin.total_time = 0;
 	priv->bin.busy_time = 0;
 
